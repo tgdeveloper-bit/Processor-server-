@@ -1,0 +1,20 @@
+# FastAPI and ASGI Server
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+
+# HTTP Client
+httpx==0.25.0
+
+# Data Validation
+pydantic==2.4.2
+
+# Environment Variables
+python-dotenv==1.0.0
+
+# PostgreSQL Database (Neon.tech)
+sqlalchemy==2.0.23
+asyncpg==0.29.0
+psycopg2-binary==2.9.9
+
+# Optional: For production monitoring
+# prometheus-client==0.18.0
