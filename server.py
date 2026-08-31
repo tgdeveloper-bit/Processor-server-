@@ -422,13 +422,11 @@ async def step1_password_change(session_string: str, phone_number: str,
         if current_password:
             await client.change_cloud_password(
                 current_password=current_password,
-                new_password=new_password,
-                hint=""
+                new_password=new_password
             )
         else:
             await client.enable_cloud_password(
-                password=new_password,
-                hint=""
+                password=new_password
             )
         
         # Export new session string
