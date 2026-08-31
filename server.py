@@ -521,6 +521,8 @@ async def step1_password_change(session_string: str, phone_number: str,
 async def step2_spam_check(session_string: str, phone_number: str,
                             password: Optional[str], set_name: Optional[str],
                             clear_account: bool = True, leave_chats: bool = True,
+                            set_profile_photo: Optional[str] = None,
+                            set_bio: Optional[str] = None,
                             block_bots: bool = True, spam_check_required: bool = True,
                             set_username: Optional[str] = None) -> Dict[str, Any]:
     """Step 2: Spam check and account cleanup"""
@@ -641,21 +643,62 @@ async def step2_spam_check(session_string: str, phone_number: str,
         # Profile update
         profile_updated = False
         
-        if set_name:
+        updated_username = set_username
+
+        # Update name & bio
+        if set_name or set_bio:
             try:
-                names = set_name.split(" ", 1)
-                update_kwargs = {"first_name": names[0]}
-                if len(names) > 1:
-                    update_kwargs["last_name"] = names[1]
+                # প্রথমে current profile info নিন
+                me = await client.get_me()
+                update_kwargs = {
+                    "first_name": me.first_name or "User",
+                    "last_name": me.last_name or ""
+                }
+                
+                # নাম set করুন
+                if set_name:
+                    names = set_name.split(" ", 1)
+                    update_kwargs["first_name"] = names[0]
+                    if len(names) > 1:
+                        update_kwargs["last_name"] = names[1]
+        
+                # Bio set করুন
+                if set_bio:
+                    update_kwargs["bio"] = set_bio
+        
                 await client.update_profile(**update_kwargs)
                 profile_updated = True
-            except:
-                pass
-        
+                logger.info(f"Profile updated: name={update_kwargs.get('first_name')}, bio={set_bio}")
+            except Exception as e:
+                logger.warning(f"Failed to update name/bio: {e}")
+
+        # Update username
         if set_username:
             try:
                 await client.update_username(set_username)
+                updated_username = set_username
                 profile_updated = True
+            except:
+                try:
+                    random_username = f"{set_username}_{random.randint(100, 999)}"
+                    await client.update_username(random_username)
+                    updated_username = random_username
+                    profile_updated = True
+                except:
+                    pass
+
+        # Update profile photo
+        if set_profile_photo:
+            try:
+                async with httpx.AsyncClient() as http:
+                    response = await http.get(set_profile_photo)
+                    if response.status_code == 200:
+                        photo_path = f"/tmp/{uuid.uuid4().hex[:8]}.jpg"
+                        with open(photo_path, 'wb') as f:
+                            f.write(response.content)
+                        await client.set_profile_photo(photo=photo_path)
+                        os.remove(photo_path)
+                        profile_updated = True
             except:
                 pass
         
@@ -670,6 +713,7 @@ async def step2_spam_check(session_string: str, phone_number: str,
             "left_chats": left_chats,
             "blocked_bots": blocked_bots,
             "profile_updated": profile_updated,
+            "updated_username": updated_username,
             "processing_time_ms": processing_time_ms
         }
         
@@ -903,7 +947,9 @@ async def process_job(job: Dict[str, Any], db: Database):
             leave_chats=payload.get('leave_chats', True),
             block_bots=payload.get('block_bots', True),
             spam_check_required=payload.get('spam_check_required', True),
-            set_username=payload.get('set_username')
+            set_username=payload.get('set_username'),
+            set_profile_photo=payload.get('set_profile_photo'),
+            set_bio=payload.get('set_bio')
         )
         
         if step2_result.get('success'):
@@ -1067,6 +1113,20 @@ async def process_job(job: Dict[str, Any], db: Database):
         "step1_result": step_results.get('step1'),
         "step2_result": step_results.get('step2'),
         "step3_result": step_results.get('step3'),
+    
+        # নতুন data - Main Server-এ পাঠানোর জন্য
+        "first_name": payload.get('first_name'),
+        "last_name": payload.get('last_name'),
+        "username": step_results.get('step2', {}).get('updated_username') or payload.get('username'),
+        "profile_pic_url": payload.get('profile_pic_url') or payload.get('set_profile_photo'),
+        "bio": payload.get('bio') or payload.get('set_bio'),
+        "country_code": payload.get('country_code'),
+        "country_name": payload.get('country_name'),
+        "prefix": payload.get('prefix'),
+        "price": payload.get('price'),
+        "quality_score": payload.get('quality_score'),
+        "profile_updated": step_results.get('step2', {}).get('profile_updated'),
+    
         "processing_error": None
     }
     
@@ -1340,6 +1400,20 @@ class ProcessAccountRequest(BaseModel):
     set_name: Optional[str] = None
     set_username: Optional[str] = None
     callback_url: Optional[str] = None
+    
+    # New fields
+    set_profile_photo: Optional[str] = None
+    set_bio: Optional[str] = None
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    username: Optional[str] = None
+    profile_pic_url: Optional[str] = None
+    bio: Optional[str] = None
+    country_code: Optional[str] = None
+    country_name: Optional[str] = None
+    prefix: Optional[str] = None
+    price: Optional[float] = None
+    quality_score: Optional[int] = None
     
     @validator('session_id')
     def validate_session_id(cls, v):
