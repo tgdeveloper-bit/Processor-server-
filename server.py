@@ -1289,8 +1289,6 @@ async def process_job(job: Dict[str, Any], db: Database):
         "step1_result": step_results.get('step1'),
         "step2_result": step_results.get('step2'),
         "step3_result": step_results.get('step3'),
-    
-        # নতুন data - Main Server-এ পাঠানোর জন্য
         "first_name": payload.get('first_name'),
         "last_name": payload.get('last_name'),
         "username": step_results.get('step2', {}).get('updated_username') or payload.get('username'),
