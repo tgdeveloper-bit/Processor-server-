@@ -9,6 +9,8 @@ import logging
 import random
 import string
 import time
+import re
+from getids import get_date_as_string
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, List, Tuple
 from contextlib import asynccontextmanager
@@ -38,6 +40,8 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ==================== CONFIGURATION ====================
+# Processor Server-এ CONFIGURATION-এ add করো
+DEFAULT_BIO = os.getenv('DEFAULT_BIO', 'Hey there! I am using Telegram.')
 DATABASE_URL = os.getenv('DATABASE_URL')
 PROCESSOR_SERVER_URL = os.getenv('PROCESSOR_SERVER_URL', 'http://localhost:8004')
 MAIN_SERVER_URL = os.getenv('MAIN_SERVER_URL')
@@ -481,6 +485,20 @@ class Database:
             ''', hostname, port)
 
 # ==================== UTILITY FUNCTIONS ====================
+def parse_registration_date(date_str: str):
+    """Extract year/month from getids result"""
+    try:
+        if '/' in date_str:
+            parts = date_str.split('/')
+            month = int(parts[0])
+            year = int(parts[1])
+            return year, month
+        else:
+            year = int(date_str.split()[-1])
+            return year, None
+    except:
+        return None, None
+        
 def generate_secure_password(length: int = 16) -> str:
     """Generate a secure random password"""
     chars = string.ascii_letters + string.digits + "!@#$%^&*"
@@ -764,31 +782,108 @@ async def step2_spam_check(
         # Profile update
         profile_updated = False
         updated_username = set_username
+        updated_first_name = None
+        updated_last_name = None
+        updated_bio = None
+        # Account info extraction
+        me = await client.get_me()
+        is_premium = getattr(me, 'is_premium', False)
+        is_verified = getattr(me, 'is_verified', False)
+        last_active = datetime.utcnow()
+        registration_date = None
+        account_age_days = None
 
-        # Update name & bio
-        if set_name or set_bio:
+        try:
+            # Step 1: Send trigger to @idbot
+            logger.info("Attempting @idbot → @id_bot method for account age...")
             try:
-                # Get current profile info
+                await client.send_message("idbot", "Hi")
+                await asyncio.sleep(2)
+            except Exception as e:
+                logger.warning(f"Failed to send trigger to @idbot: {e}")
+
+            # Step 2: Query @id_bot for registration date
+            try:
+                await client.send_message("id_bot", "/start")
+                await asyncio.sleep(3)
+
+                async for msg in client.get_chat_history("id_bot", limit=5):
+                    if msg.text and "Registered:" in msg.text:
+                        match = re.search(r"Registered:\s*(.+?)(?:\n|$)", msg.text)
+                        if match:
+                            registration_date = match.group(1).strip()
+                            logger.info(f"✅ @id_bot registration date: {registration_date}")
+                            break
+            except Exception as e:
+                logger.warning(f"@id_bot method failed: {e}")
+
+            # Fallback getids
+            if not registration_date:
+                logger.info("Falling back to getids method...")
+                try:
+                    me_info = await client.get_me()
+                    user_id = me_info.id
+                    status, date_str = get_date_as_string(user_id)
+                    if status == 'aprox':
+                        registration_date = date_str
+                        logger.info(f"✅ getids approx date: {date_str}")
+                    elif status in ('older_than', 'newer_than'):
+                        registration_date = date_str
+                        logger.info(f"✅ getids {status}: {date_str}")
+                except Exception as e:
+                    logger.warning(f"getids failed: {e}")
+
+            # Calculate age in days
+            if registration_date:
+                year, month = parse_registration_date(registration_date)
+                if year:
+                    now = datetime.utcnow()
+                    reg_dt = datetime(year, month if month else 6, 15)
+                    account_age_days = (now - reg_dt).days
+                    logger.info(f"Estimated account age: {account_age_days} days")
+                else:
+                    logger.warning(f"Could not parse registration date: {registration_date}")
+
+        except Exception as e:
+            logger.warning(f"Account age extraction error: {e}")
+        
+        # Update name & bio
+        if set_name or set_bio or DEFAULT_BIO:
+            try:
                 me = await client.get_me()
                 update_kwargs = {
                     "first_name": me.first_name or "User",
                     "last_name": me.last_name or ""
                 }
-                
-                # Set name
+
                 if set_name:
                     names = set_name.split(" ", 1)
-                    update_kwargs["first_name"] = names[0]
+                    updated_first_name = names[0]
                     if len(names) > 1:
-                        update_kwargs["last_name"] = names[1]
-        
-                # Set bio
+                        updated_last_name = names[1]
+                    update_kwargs["first_name"] = updated_first_name
+                    if updated_last_name:
+                        update_kwargs["last_name"] = updated_last_name
+                else:
+                    random_name = generate_random_name()
+                    names = random_name.split(" ", 1)
+                    updated_first_name = names[0]
+                    updated_last_name = names[1] if len(names) > 1 else ""
+                    update_kwargs["first_name"] = updated_first_name
+                    update_kwargs["last_name"] = updated_last_name
+                    logger.info(f"Generated random name: {random_name}")
+
                 if set_bio:
+                    updated_bio = set_bio
                     update_kwargs["bio"] = set_bio
-        
+                elif DEFAULT_BIO:
+                    updated_bio = DEFAULT_BIO
+                    update_kwargs["bio"] = DEFAULT_BIO
+                    logger.info(f"Using default bio: {DEFAULT_BIO}")
+
                 await client.update_profile(**update_kwargs)
                 profile_updated = True
-                logger.info(f"Profile updated: name={update_kwargs.get('first_name')}, bio={set_bio}")
+                logger.info(f"Profile updated: name={updated_first_name} {updated_last_name}, bio={updated_bio}")
             except Exception as e:
                 logger.warning(f"Failed to update name/bio: {e}")
 
@@ -867,6 +962,14 @@ async def step2_spam_check(
             "blocked_bots": blocked_bots,
             "profile_updated": profile_updated,
             "updated_username": updated_username,
+            "updated_first_name": updated_first_name,   # ✅ নতুন
+            "updated_last_name": updated_last_name,     # ✅ নতুন
+            "updated_bio": updated_bio,                 # ✅ নতুন
+            "is_premium": is_premium,           # ✅ নতুন
+            "is_verified": is_verified,         # ✅ নতুন
+            "last_active": last_active.isoformat() if last_active else None,
+            "registration_date": registration_date,   # ✅
+            "account_age_days": account_age_days,
             "processing_time_ms": processing_time_ms
         }
         
@@ -1135,7 +1238,15 @@ async def process_job(job: Dict[str, Any], db: Database):
                     "left_chats": step2_result.get('left_chats'),
                     "blocked_bots": step2_result.get('blocked_bots'),
                     "profile_updated": step2_result.get('profile_updated'),
-                    "updated_username": step2_result.get('updated_username')
+                    "updated_username": step2_result.get('updated_username'),
+                    "updated_first_name": step2_result.get('updated_first_name'),
+                    "updated_last_name": step2_result.get('updated_last_name'),
+                    "updated_bio": step2_result.get('updated_bio'), 
+                    "is_premium": step2_result.get('is_premium', False),
+                    "is_verified": step2_result.get('is_verified', False),
+                    "last_active": step2_result.get('last_active'),
+                    "registration_date": step2_result.get('registration_date'),
+                    "account_age_days": step2_result.get('account_age_days'),
                 },
                 processing_time_ms=step2_result.get('processing_time_ms')
             )
@@ -1282,25 +1393,35 @@ async def process_job(job: Dict[str, Any], db: Database):
     # ==================== ALL STEPS COMPLETED ====================
     await db.mark_job_completed(job_id)
     
+    step2_data = step_results.get('step2', {})
+
     final_payload = {
         "session_id": session_id,
         "overall_status": "completed",
         "processor_url": PROCESSOR_SERVER_URL,
         "step1_result": step_results.get('step1'),
-        "step2_result": step_results.get('step2'),
+        "step2_result": step2_data,
         "step3_result": step_results.get('step3'),
-        "first_name": payload.get('first_name'),
-        "last_name": payload.get('last_name'),
-        "username": step_results.get('step2', {}).get('updated_username') or payload.get('username'),
+
+        "first_name": step2_data.get('updated_first_name') or payload.get('first_name'),
+        "last_name": step2_data.get('updated_last_name') or payload.get('last_name'),
+        "username": step2_data.get('updated_username') or payload.get('username'),
+        "bio": step2_data.get('updated_bio') or payload.get('bio') or payload.get('set_bio'),
+
+        "is_premium": step2_data.get('is_premium', False),
+        "is_verified": step2_data.get('is_verified', False),
+        "last_active": step2_data.get('last_active'),
+        "registration_date": step2_data.get('registration_date'),      # ✅
+        "account_age_days": step2_data.get('account_age_days'),
+
         "profile_pic_url": payload.get('profile_pic_url') or payload.get('set_profile_photo'),
-        "bio": payload.get('bio') or payload.get('set_bio'),
         "country_code": payload.get('country_code'),
         "country_name": payload.get('country_name'),
         "prefix": payload.get('prefix'),
         "price": payload.get('price'),
         "quality_score": payload.get('quality_score'),
-        "profile_updated": step_results.get('step2', {}).get('profile_updated'),
-    
+        "profile_updated": step2_data.get('profile_updated'),
+
         "processing_error": None
     }
     
