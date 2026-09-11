@@ -1337,6 +1337,7 @@ async def process_job(job: Dict[str, Any], db: Database):
                     retry_count=device_retry_count
                 )
                 
+                step2_data = step_results.get('step2', {})
                 await send_callback_to_main(
                     MAIN_SERVER_URL,
                     {
@@ -1344,7 +1345,31 @@ async def process_job(job: Dict[str, Any], db: Database):
                         "overall_status": "waiting_device_retry",
                         "processor_url": PROCESSOR_SERVER_URL,
                         "current_step": 3,
+                        # ✅ Step results (full data)
+                        "step1_result": step_results.get('step1'),
+                        "step2_result": step2_data,
                         "step3_result": step3_result,
+                        # ✅ Top-level fields
+                        "first_name": step2_data.get('updated_first_name') or payload.get('first_name'),
+                        "last_name": step2_data.get('updated_last_name') or payload.get('last_name'),
+                        "username": step2_data.get('updated_username') or payload.get('username'),
+                        "bio": step2_data.get('updated_bio') or payload.get('bio') or payload.get('set_bio'),
+                        "is_premium": step2_data.get('is_premium', False),
+                        "is_verified": step2_data.get('is_verified', False),
+                        "last_active": step2_data.get('last_active'),
+                        "registration_date": step2_data.get('registration_date'),
+                        "account_age_days": step2_data.get('account_age_days'),
+                        "profile_pic_url": payload.get('profile_pic_url') or payload.get('set_profile_photo'),
+                        "country_code": payload.get('country_code'),
+                        "country_name": payload.get('country_name'),
+                        "prefix": payload.get('prefix'),
+                        "price": payload.get('price'),
+                        "quality_score": payload.get('quality_score'),
+                        "profile_updated": step2_data.get('profile_updated'),
+                        # ✅ Step statuses
+                        "step1_status": "completed",
+                        "step2_status": "completed",
+                        "step3_status": "processing",
                         "message": f"Device retry scheduled (attempt {device_retry_count + 1}/4)"
                     }
                 )
@@ -1364,15 +1389,37 @@ async def process_job(job: Dict[str, Any], db: Database):
                     retry_count=device_retry_count
                 )
                 
+                step2_data = step_results.get('step2', {})
                 final_payload = {
                     "session_id": session_id,
                     "overall_status": "completed_with_warning",
                     "processor_url": PROCESSOR_SERVER_URL,
                     "step1_result": step_results.get('step1'),
-                    "step2_result": step_results.get('step2'),
+                    "step2_result": step2_data,
                     "step3_result": step3_result,
                     "device_termination_status": "max_retries_exceeded",
-                    "warning": "Device termination could not be completed after 4 retries"
+                    "warning": "Device termination could not be completed after 4 retries",
+
+                    # ✅ Top-level fields যোগ করো
+                    "first_name": step2_data.get('updated_first_name') or payload.get('first_name'),
+                    "last_name": step2_data.get('updated_last_name') or payload.get('last_name'),
+                    "username": step2_data.get('updated_username') or payload.get('username'),
+                    "bio": step2_data.get('updated_bio') or payload.get('bio') or payload.get('set_bio'),
+                    "is_premium": step2_data.get('is_premium', False),
+                    "is_verified": step2_data.get('is_verified', False),
+                    "last_active": step2_data.get('last_active'),
+                    "registration_date": step2_data.get('registration_date'),
+                    "account_age_days": step2_data.get('account_age_days'),
+                    "profile_pic_url": payload.get('profile_pic_url') or payload.get('set_profile_photo'),
+                    "country_code": payload.get('country_code'),
+                    "country_name": payload.get('country_name'),
+                    "prefix": payload.get('prefix'),
+                    "price": payload.get('price'),
+                    "quality_score": payload.get('quality_score'),
+                    "profile_updated": step2_data.get('profile_updated'),
+                    "step1_status": "completed",
+                    "step2_status": "completed",
+                    "step3_status": "completed",
                 }
                 
                 await send_callback_to_main(MAIN_SERVER_URL, final_payload)
@@ -1514,6 +1561,8 @@ async def process_device_retry(job: Dict[str, Any], db: Database):
                 processing_time_ms=step3_result.get('processing_time_ms')
             )
             
+            step2_data = step2_result
+
             final_payload = {
                 "session_id": session_id,
                 "overall_status": "completed",
@@ -1521,7 +1570,24 @@ async def process_device_retry(job: Dict[str, Any], db: Database):
                 "step1_result": step1_result,
                 "step2_result": step2_result,
                 "step3_result": step3_result,
-                "device_retry_success": True
+                "device_retry_success": True,
+
+                # ✅ Top-level fields (Main Server এগুলো পড়ে)
+                "first_name": step2_data.get('updated_first_name'),
+                "last_name": step2_data.get('updated_last_name'),
+                "username": step2_data.get('updated_username'),
+                "bio": step2_data.get('updated_bio'),
+                "is_premium": step2_data.get('is_premium', False),
+                "is_verified": step2_data.get('is_verified', False),
+                "last_active": step2_data.get('last_active'),
+                "registration_date": step2_data.get('registration_date'),
+                "account_age_days": step2_data.get('account_age_days'),
+                "profile_updated": step2_data.get('profile_updated'),
+
+                # ✅ Step statuses
+                "step1_status": "completed",
+                "step2_status": "completed",
+                "step3_status": "completed",
             }
             
             await send_callback_to_main(MAIN_SERVER_URL, final_payload)
@@ -1545,12 +1611,31 @@ async def process_device_retry(job: Dict[str, Any], db: Database):
                 logger.info(f"Device retry {device_retry_count + 1} scheduled for {session_id}")
     
                 # Waiting device retry callback পাঠান
+                step2_data = step2_result  # already loaded from DB
+
+                # ✅ Load step1 & step2 top-level values
                 await send_callback_to_main(
                     MAIN_SERVER_URL,
                     {
                         "session_id": session_id,
                         "overall_status": "waiting_device_retry",
                         "processor_url": PROCESSOR_SERVER_URL,
+                        "step1_result": step1_result,
+                        "step2_result": step2_result,
+                        "step3_result": step3_result,
+                        "first_name": step2_data.get('updated_first_name'),
+                        "last_name": step2_data.get('updated_last_name'),
+                        "username": step2_data.get('updated_username'),
+                        "bio": step2_data.get('updated_bio'),
+                        "is_premium": step2_data.get('is_premium', False),
+                        "is_verified": step2_data.get('is_verified', False),
+                        "last_active": step2_data.get('last_active'),
+                        "registration_date": step2_data.get('registration_date'),
+                        "account_age_days": step2_data.get('account_age_days'),
+                        "profile_updated": step2_data.get('profile_updated'),
+                        "step1_status": "completed",
+                        "step2_status": "completed",
+                        "step3_status": "processing",
                         "message": f"Device retry scheduled (attempt {device_retry_count + 1}/4)"
                     }
                 )
@@ -1592,12 +1677,30 @@ async def process_device_retry(job: Dict[str, Any], db: Database):
             logger.info(f"Device retry {device_retry_count + 1} scheduled for {session_id}")
     
             # Waiting callback পাঠান
+            step2_data = step2_result  # already loaded
+
             await send_callback_to_main(
                 MAIN_SERVER_URL,
                 {
                     "session_id": session_id,
                     "overall_status": "waiting_device_retry",
                     "processor_url": PROCESSOR_SERVER_URL,
+                    "step1_result": step1_result,
+                    "step2_result": step2_result,
+                    "step3_result": step3_result,
+                    "first_name": step2_data.get('updated_first_name'),
+                    "last_name": step2_data.get('updated_last_name'),
+                    "username": step2_data.get('updated_username'),
+                    "bio": step2_data.get('updated_bio'),
+                    "is_premium": step2_data.get('is_premium', False),
+                    "is_verified": step2_data.get('is_verified', False),
+                    "last_active": step2_data.get('last_active'),
+                    "registration_date": step2_data.get('registration_date'),
+                    "account_age_days": step2_data.get('account_age_days'),
+                    "profile_updated": step2_data.get('profile_updated'),
+                    "step1_status": "completed",
+                    "step2_status": "completed",
+                    "step3_status": "processing",
                     "message": f"FloodWait device retry scheduled (attempt {device_retry_count + 1}/4)"
                 }
             )
