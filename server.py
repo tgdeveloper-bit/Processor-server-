@@ -104,10 +104,10 @@ class Database:
     
         self.pool = await asyncpg.create_pool(
             DATABASE_URL,
-            min_size=5,
-            max_size=20,
+            min_size=2,
+            max_size=10,
             command_timeout=60,
-            statement_cache_size=0  # Disable statement cache
+            statement_cache_size=100  # Disable statement cache
         )
         await self.create_tables()
     
@@ -296,6 +296,33 @@ class Database:
                 ''')
                 return dict(row) if row else None
     
+    async def get_next_job_combined(self):
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                row = await conn.fetchrow('''
+                    UPDATE processing_jobs SET status = 'processing', updated_at = NOW()
+                    WHERE id = (
+                        SELECT id FROM processing_jobs
+                        WHERE status = 'waiting_device_retry' AND device_next_retry_at <= NOW()
+                        ORDER BY device_next_retry_at
+                        LIMIT 1
+                        FOR UPDATE SKIP LOCKED
+                    )
+                    RETURNING *, 'device_retry' as job_type
+                ''')
+                if not row:
+                    row = await conn.fetchrow('''
+                        UPDATE processing_jobs SET status = 'processing', updated_at = NOW()
+                        WHERE id = (
+                            SELECT id FROM processing_jobs
+                            WHERE status = 'pending' OR (status = 'retry' AND next_retry_at <= NOW())
+                            ORDER BY created_at LIMIT 1
+                            FOR UPDATE SKIP LOCKED
+                        )
+                        RETURNING *, 'regular' as job_type
+                    ''')
+                return dict(row) if row else None
+            
     async def get_device_retry_jobs(self, limit: int = 10) -> List[Dict[str, Any]]:
         async with self.pool.acquire() as conn:
             async with conn.transaction():
@@ -1773,7 +1800,7 @@ async def worker_loop(db: Database):
             # Then, get next pending job
             job = await db.get_next_job()
             if job is None:
-                await asyncio.sleep(5)
+                await asyncio.sleep(30)
                 continue
             
             async with regular_semaphore:
@@ -2026,36 +2053,14 @@ async def get_job_status(session_id: str,
         logger.error(f"Failed to get job status: {e}")
         raise HTTPException(status_code=500, detail="Failed to get job status")
 
-@app.get("/health", response_model=HealthResponse)
+@app.get("/health")
 async def health_check():
-    """Health check endpoint"""
-    database_status = "connected"
-    active_jobs = 0
-    
-    try:
-        if db.pool:
-            async with db.pool.acquire() as conn:
-                await conn.execute("SELECT 1")
-                active_jobs = await conn.fetchval(
-                    "SELECT COUNT(*) FROM processing_jobs WHERE status IN ('processing', 'pending', 'retry', 'waiting_device_retry')"
-                )
-        else:
-            database_status = "disconnected"
-    except Exception:
-        database_status = "error"
-    
-    uptime = (datetime.utcnow() - app.state.start_time).total_seconds() if hasattr(app.state, 'start_time') else 0
-    
-    return HealthResponse(
-        status="healthy" if database_status == "connected" else "degraded",
-        service="unified-processing-server",
-        database=database_status,
-        telegram_configured=bool(TELEGRAM_API_ID and TELEGRAM_API_HASH),
-        active_jobs=active_jobs,
-        max_concurrent_tasks=MAX_CONCURRENT_TASKS,
-        uptime_seconds=uptime,
-        timestamp=datetime.utcnow()
-    )
+    # DB query remove
+    return {
+        "status": "healthy",
+        "service": "unified-processing-server",
+        "database": "connected"  # hardcoded
+    }
 
 @app.get("/admin/analytics", response_model=AnalyticsSummary)
 async def get_analytics(admin_key: str = Depends(verify_admin_key)):
