@@ -60,7 +60,13 @@ DEVICE_RETRY_INTERVALS = [
     {"hours": 6, "retry_count": 3},
     {"hours": 24, "retry_count": 4}
 ]
-
+MONTH_MAP = {
+    'january': 1, 'february': 2, 'march': 3, 'april': 4,
+    'may': 5, 'june': 6, 'july': 7, 'august': 8,
+    'september': 9, 'october': 10, 'november': 11, 'december': 12,
+    'jan': 1, 'feb': 2, 'mar': 3, 'apr': 4, 'jun': 6,
+    'jul': 7, 'aug': 8, 'sep': 9, 'sept': 9, 'oct': 10, 'nov': 11, 'dec': 12
+}
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -513,19 +519,85 @@ class Database:
 
 # ==================== UTILITY FUNCTIONS ====================
 def parse_registration_date(date_str: str):
-    """Extract year/month from getids result"""
-    try:
-        if '/' in date_str:
+    """
+    Supports:
+    - "December 2025"     → (2025, 12)
+    - "Dec 2025"          → (2025, 12)
+    - "12/2025"           → (2025, 12)
+    - "2025"              → (2025, None)
+    """
+    if not date_str:
+        return None, None
+
+    date_str = date_str.strip()
+
+    # Format: "12/2025" or "12/25"
+    if '/' in date_str:
+        try:
             parts = date_str.split('/')
             month = int(parts[0])
             year = int(parts[1])
+            if year < 100:
+                year += 2000
             return year, month
-        else:
-            year = int(date_str.split()[-1])
-            return year, None
-    except:
-        return None, None
-        
+        except:
+            pass
+
+    # Format: "December 2025" / "Dec 2025"
+    tokens = date_str.replace(',', '').split()
+    year, month = None, None
+    for tok in tokens:
+        tok_lower = tok.lower()
+        if tok_lower in MONTH_MAP:
+            month = MONTH_MAP[tok_lower]
+        elif tok.isdigit() and len(tok) == 4:
+            year = int(tok)
+        elif tok.isdigit() and len(tok) == 2:
+            year = 2000 + int(tok)
+
+    return year, month
+
+
+def calculate_account_age(reg_year: int, reg_month: Optional[int]) -> Dict[str, Any]:
+    """
+    Calculate age from year (and month if available).
+    If month unknown → use June as mid-point estimate.
+    Returns years (float), years_int, months, days.
+    """
+    now = datetime.utcnow()
+
+    if reg_month is None:
+        # Year-only case → assume mid-year
+        reg_dt = datetime(reg_year, 6, 15)
+        is_estimated = True
+    else:
+        reg_dt = datetime(reg_year, reg_month, 1)
+        is_estimated = False
+
+    delta_days = (now - reg_dt).days
+    if delta_days < 0:
+        delta_days = 0
+
+    # Years (float) with 2 decimal
+    years_float = round(delta_days / 365.25, 2)
+    years_int = delta_days // 365
+
+    # Months breakdown
+    total_months = int(delta_days / 30.44)
+
+    return {
+        "age_days": delta_days,
+        "age_years": years_float,       # e.g. 0.75
+        "age_years_int": years_int,     # e.g. 0
+        "age_months": total_months,     # e.g. 9
+        "is_estimated": is_estimated,
+        "registered_display": (
+            f"{list(MONTH_MAP.keys())[list(MONTH_MAP.values()).index(reg_month)].title()} {reg_year}"
+            if reg_month else str(reg_year)
+        )
+    }
+    
+
 def generate_secure_password(length: int = 16) -> str:
     """Generate a secure random password"""
     chars = string.ascii_letters + string.digits + "!@#$%^&*"
@@ -819,60 +891,60 @@ async def step2_spam_check(
         last_active = datetime.utcnow()
         registration_date = None
         account_age_days = None
+        account_age_years = None
+        account_age_years_int = None
+        age_is_estimated = False
 
+        # ===== Try @id_bot first (source of truth) =====
         try:
-            # Step 1: Send trigger to @idbot
-            logger.info("Attempting @idbot → @id_bot method for account age...")
+            logger.info("🔍 Trying @id_bot for registration date...")
             try:
                 await client.send_message("idbot", "Hi")
                 await asyncio.sleep(2)
             except Exception as e:
-                logger.warning(f"Failed to send trigger to @idbot: {e}")
+                logger.warning(f"idbot trigger failed: {e}")
 
-            # Step 2: Query @id_bot for registration date
-            try:
-                await client.send_message("id_bot", "/start")
-                await asyncio.sleep(3)
+            await client.send_message("id_bot", "/start")
+            await asyncio.sleep(3)
 
-                async for msg in client.get_chat_history("id_bot", limit=5):
-                    if msg.text and "Registered:" in msg.text:
-                        match = re.search(r"Registered:\s*(.+?)(?:\n|$)", msg.text)
-                        if match:
-                            registration_date = match.group(1).strip()
-                            logger.info(f"✅ @id_bot registration date: {registration_date}")
-                            break
-            except Exception as e:
-                logger.warning(f"@id_bot method failed: {e}")
-
-            # Fallback getids
-            if not registration_date:
-                logger.info("Falling back to getids method...")
-                try:
-                    me_info = await client.get_me()
-                    user_id = me_info.id
-                    status, date_str = get_date_as_string(user_id)
-                    if status == 'aprox':
-                        registration_date = date_str
-                        logger.info(f"✅ getids approx date: {date_str}")
-                    elif status in ('older_than', 'newer_than'):
-                        registration_date = date_str
-                        logger.info(f"✅ getids {status}: {date_str}")
-                except Exception as e:
-                    logger.warning(f"getids failed: {e}")
-
-            # Calculate age in days
-            if registration_date:
-                year, month = parse_registration_date(registration_date)
-                if year:
-                    now = datetime.utcnow()
-                    reg_dt = datetime(year, month if month else 6, 15)
-                    account_age_days = (now - reg_dt).days
-                    logger.info(f"Estimated account age: {account_age_days} days")
-                else:
-                    logger.warning(f"Could not parse registration date: {registration_date}")
-
+            async for msg in client.get_chat_history("id_bot", limit=5):
+                if msg.text and "Registered:" in msg.text:
+                    match = re.search(r"Registered:\s*(.+?)(?:\n|$)", msg.text)
+                    if match:
+                        registration_date = match.group(1).strip()
+                        logger.info(f"✅ @id_bot registration: '{registration_date}'")
+                        break
         except Exception as e:
-            logger.warning(f"Account age extraction error: {e}")
+            logger.warning(f"@id_bot method failed: {e}")
+
+        # ===== Fallback: getids (only if idbot failed) =====
+        if not registration_date:
+            logger.info("⚠️ Falling back to getids...")
+            try:
+                me_info = await client.get_me()
+                user_id = me_info.id
+                status, date_str = get_date_as_string(user_id)
+                if status in ('aprox', 'older_than', 'newer_than'):
+                    registration_date = date_str
+                    logger.info(f"📅 getids ({status}): {date_str}")
+            except Exception as e:
+                logger.warning(f"getids failed: {e}")
+
+        # ===== Calculate age =====
+        if registration_date:
+            year, month = parse_registration_date(registration_date)
+            if year:
+                age_info = calculate_account_age(year, month)
+                account_age_days = age_info['age_days']
+                account_age_years = age_info['age_years']
+                account_age_years_int = age_info['age_years_int']
+                age_is_estimated = age_info['is_estimated']
+                logger.info(
+                    f"📊 Age: {account_age_years} years ({account_age_days} days), "
+                    f"registered={age_info['registered_display']}, estimated={age_is_estimated}"
+                )
+            else:
+                logger.warning(f"❌ Cannot parse registration date: '{registration_date}'")
         
         # Update name & bio
         if set_name or set_bio or DEFAULT_BIO:
@@ -946,36 +1018,62 @@ async def step2_spam_check(
                 logger.warning(f"Error checking username: {e}")
 
         # Update profile photo
-        if set_profile_photo:
+        photo_url = set_profile_photo  # ✅ only this
+        # ✅ main server থেকে আসা profile_pic_url ও ধরো
+        if not photo_url:
+            photo_url = None  # payload.get('profile_pic_url') already handled upstream
+
+        if photo_url:
             try:
-                logger.info(f"Attempting to download photo from: {set_profile_photo}")
-                        
+                logger.info(f"📥 Downloading photo from: {photo_url}")
+
                 async with httpx.AsyncClient(timeout=30, follow_redirects=True) as http:
-                    response = await http.get(set_profile_photo)
-                    logger.info(f"Download response: {response.status_code}")
-                    logger.info(f"Content-Type: {response.headers.get('content-type')}")
-                    logger.info(f"Content-Length: {len(response.content)} bytes")
-            
-                    if response.status_code == 200 and len(response.content) > 0:
-                        photo_path = f"/tmp/photo_{uuid.uuid4().hex[:8]}.jpg"
-                
-                        with open(photo_path, 'wb') as f:
-                            f.write(response.content)
-                
-                        logger.info(f"Photo saved to: {photo_path}")
-                
+                    response = await http.get(photo_url)
+
+                content_type = response.headers.get('content-type', '').lower()
+                content_len = len(response.content)
+
+                logger.info(f"Response: {response.status_code}, Type: {content_type}, Size: {content_len}")
+
+                # ✅ Validation
+                if response.status_code != 200:
+                    logger.error(f"❌ Bad status: {response.status_code}")
+                elif content_len < 1000:
+                    logger.error(f"❌ File too small ({content_len} bytes) - not a valid image")
+                elif not content_type.startswith('image/'):
+                    logger.error(f"❌ Not an image! Content-Type: {content_type}")
+                    logger.error(f"   First 200 bytes: {response.content[:200]}")
+                else:
+                    photo_path = f"/tmp/photo_{uuid.uuid4().hex[:8]}.jpg"
+                    with open(photo_path, 'wb') as f:
+                        f.write(response.content)
+
+                    logger.info(f"✅ Valid image saved: {photo_path} ({content_len} bytes)")
+
+                    try:
+                        # ✅ আগে existing photo delete করো (conflict এড়াতে)
                         try:
-                            await client.set_profile_photo(photo=photo_path)
-                            profile_updated = True
-                            logger.info(f"✅ Profile photo set successfully!")
-                        except Exception as photo_error:
-                            logger.error(f"Failed to set profile photo: {photo_error}")
-                
-                        os.remove(photo_path)
-                    else:
-                        logger.warning(f"Failed to download photo: HTTP {response.status_code}, Size: {len(response.content)}")
+                            async for photo in client.get_chat_photos("me", limit=1):
+                                await client.delete_profile_photos(photo.file_id)
+                                logger.info("🗑️ Old PFP deleted")
+                                break
+                        except Exception as e:
+                            logger.warning(f"No old photo to delete: {e}")
+
+                        # ✅ তারপর new photo set করো
+                        await client.set_profile_photo(photo=photo_path)
+                        profile_updated = True
+                        logger.info(f"✅✅ Profile photo set successfully for {phone_number}!")
+                    except Exception as photo_error:
+                        logger.error(f"❌ set_profile_photo failed: {photo_error}")
+                    finally:
+                        try:
+                            os.remove(photo_path)
+                        except:
+                            pass
+
             except Exception as e:
-                logger.error(f"Photo update error: {e}")
+                logger.error(f"❌ Photo download error: {e}")
         
         processing_time_ms = int((time.time() - start_time) * 1000)
         
@@ -995,8 +1093,11 @@ async def step2_spam_check(
             "is_premium": is_premium,           # ✅ নতুন
             "is_verified": is_verified,         # ✅ নতুন
             "last_active": last_active.isoformat() if last_active else None,
-            "registration_date": registration_date,   # ✅
+            "registration_date": registration_date,
             "account_age_days": account_age_days,
+            "account_age_years": account_age_years,           # ✅ NEW: e.g. 0.75
+            "account_age_years_int": account_age_years_int,   # ✅ NEW: e.g. 0
+            "age_is_estimated": age_is_estimated, 
             "processing_time_ms": processing_time_ms
         }
         
@@ -1250,7 +1351,7 @@ async def process_job(job: Dict[str, Any], db: Database):
             block_bots=payload.get('block_bots', True),
             spam_check_required=payload.get('spam_check_required', True),
             set_username=payload.get('set_username'),
-            set_profile_photo=payload.get('set_profile_photo'),
+            set_profile_photo=payload.get('set_profile_photo') or payload.get('profile_pic_url'),
             set_bio=payload.get('set_bio')
         )
         
@@ -1274,6 +1375,9 @@ async def process_job(job: Dict[str, Any], db: Database):
                     "last_active": step2_result.get('last_active'),
                     "registration_date": step2_result.get('registration_date'),
                     "account_age_days": step2_result.get('account_age_days'),
+                    "account_age_years": step2_result.get('account_age_years'),
+                    "account_age_years_int": step2_result.get('account_age_years_int'),
+                    "age_is_estimated": step2_result.get('age_is_estimated', False),
                 },
                 processing_time_ms=step2_result.get('processing_time_ms')
             )
@@ -1387,6 +1491,9 @@ async def process_job(job: Dict[str, Any], db: Database):
                         "registration_date": step2_data.get('registration_date'),
                         "account_age_days": step2_data.get('account_age_days'),
                         "profile_pic_url": payload.get('profile_pic_url') or payload.get('set_profile_photo'),
+                        "account_age_years": step2_data.get('account_age_years'),
+                        "account_age_years_int": step2_data.get('account_age_years_int'),
+                        "age_is_estimated": step2_data.get('age_is_estimated', False),
                         "country_code": payload.get('country_code'),
                         "country_name": payload.get('country_name'),
                         "prefix": payload.get('prefix'),
@@ -1437,6 +1544,9 @@ async def process_job(job: Dict[str, Any], db: Database):
                     "last_active": step2_data.get('last_active'),
                     "registration_date": step2_data.get('registration_date'),
                     "account_age_days": step2_data.get('account_age_days'),
+                    "account_age_years": step2_data.get('account_age_years'),         # ✅ NEW
+                    "account_age_years_int": step2_data.get('account_age_years_int'), # ✅ NEW
+                    "age_is_estimated": step2_data.get('age_is_estimated'),
                     "profile_pic_url": payload.get('profile_pic_url') or payload.get('set_profile_photo'),
                     "country_code": payload.get('country_code'),
                     "country_name": payload.get('country_name'),
@@ -1485,8 +1595,11 @@ async def process_job(job: Dict[str, Any], db: Database):
         "is_premium": step2_data.get('is_premium', False),
         "is_verified": step2_data.get('is_verified', False),
         "last_active": step2_data.get('last_active'),
-        "registration_date": step2_data.get('registration_date'),      # ✅
+        "registration_date": step2_data.get('registration_date'),
         "account_age_days": step2_data.get('account_age_days'),
+        "account_age_years": step2_data.get('account_age_years'),            # ✅ NEW
+        "account_age_years_int": step2_data.get('account_age_years_int'),    # ✅ NEW
+        "age_is_estimated": step2_data.get('age_is_estimated', False),       # ✅ NEW
 
         "profile_pic_url": payload.get('profile_pic_url') or payload.get('set_profile_photo'),
         "country_code": payload.get('country_code'),
@@ -1610,6 +1723,9 @@ async def process_device_retry(job: Dict[str, Any], db: Database):
                 "registration_date": step2_data.get('registration_date'),
                 "account_age_days": step2_data.get('account_age_days'),
                 "profile_updated": step2_data.get('profile_updated'),
+                "account_age_years": step2_data.get('account_age_years'),
+                "account_age_years_int": step2_data.get('account_age_years_int'),
+                "age_is_estimated": step2_data.get('age_is_estimated', False),
 
                 # ✅ Step statuses
                 "step1_status": "completed",
@@ -1659,6 +1775,9 @@ async def process_device_retry(job: Dict[str, Any], db: Database):
                         "last_active": step2_data.get('last_active'),
                         "registration_date": step2_data.get('registration_date'),
                         "account_age_days": step2_data.get('account_age_days'),
+                        "account_age_years": step2_data.get('account_age_years'),
+                        "account_age_years_int": step2_data.get('account_age_years_int'),
+                        "age_is_estimated": step2_data.get('age_is_estimated', False),
                         "profile_updated": step2_data.get('profile_updated'),
                         "step1_status": "completed",
                         "step2_status": "completed",
@@ -1670,7 +1789,9 @@ async def process_device_retry(job: Dict[str, Any], db: Database):
                 # Max retries exceeded
                 await db.mark_job_completed(job_id)
                 await db.update_step_status(job_id, 3, 'completed')
-                
+    
+                step2_data = step2_result  # already loaded
+    
                 final_payload = {
                     "session_id": session_id,
                     "overall_status": "completed_with_warning",
@@ -1678,9 +1799,28 @@ async def process_device_retry(job: Dict[str, Any], db: Database):
                     "step1_result": step1_result,
                     "step2_result": step2_result,
                     "step3_result": step3_result,
-                    "warning": "Device termination max retries exceeded"
+                    "warning": "Device termination max retries exceeded",
+
+                    # ✅ Top-level fields যোগ করো
+                    "first_name": step2_data.get('updated_first_name'),
+                    "last_name": step2_data.get('updated_last_name'),
+                    "username": step2_data.get('updated_username'),
+                    "bio": step2_data.get('updated_bio'),
+                    "is_premium": step2_data.get('is_premium', False),
+                    "is_verified": step2_data.get('is_verified', False),
+                    "last_active": step2_data.get('last_active'),
+                    "registration_date": step2_data.get('registration_date'),
+                    "account_age_days": step2_data.get('account_age_days'),
+                    "account_age_years": step2_data.get('account_age_years'),
+                    "account_age_years_int": step2_data.get('account_age_years_int'),
+                    "age_is_estimated": step2_data.get('age_is_estimated', False),
+                    "profile_updated": step2_data.get('profile_updated'),
+
+                    "step1_status": "completed",
+                    "step2_status": "completed",
+                    "step3_status": "completed",
                 }
-                
+    
                 await send_callback_to_main(MAIN_SERVER_URL, final_payload)
                 
         else:
@@ -1724,6 +1864,9 @@ async def process_device_retry(job: Dict[str, Any], db: Database):
                     "last_active": step2_data.get('last_active'),
                     "registration_date": step2_data.get('registration_date'),
                     "account_age_days": step2_data.get('account_age_days'),
+                    "account_age_years": step2_data.get('account_age_years'),
+                    "account_age_years_int": step2_data.get('account_age_years_int'),
+                    "age_is_estimated": step2_data.get('age_is_estimated', False),
                     "profile_updated": step2_data.get('profile_updated'),
                     "step1_status": "completed",
                     "step2_status": "completed",
