@@ -67,6 +67,16 @@ MONTH_MAP = {
     'jan': 1, 'feb': 2, 'mar': 3, 'apr': 4, 'jun': 6,
     'jul': 7, 'aug': 8, 'sep': 9, 'sept': 9, 'oct': 10, 'nov': 11, 'dec': 12
 }
+# ==================== PROTECTED BOTS (Never Block) ====================
+PROTECTED_BOT_IDS = {
+    178220800,  
+    722809559,
+    93372553,
+    1087968824,
+    47026416,
+    369208241,
+    5313337120
+    }
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -788,7 +798,7 @@ async def step2_spam_check(
         left_chats = 0
         blocked_bots = 0
         
-        # Cleanup section - পরিবর্তিত version
+        # Cleanup section
         if clear_account:
             try:
                 dialogs = []
@@ -804,11 +814,14 @@ async def step2_spam_check(
                     chat_type = chat.type
                     chat_title = getattr(chat, 'title', '') or getattr(chat, 'first_name', '') or str(chat_id)
 
-                    # Bot check - ChatType.BOT ব্যবহার করুন
                     is_bot = (chat_type == ChatType.BOT)
-                    
                     if not is_bot and hasattr(chat, 'is_bot'):
                         is_bot = chat.is_bot
+
+                    # ✅ Protected bot check — শুধু ID দিয়ে
+                    if is_bot and chat_id in PROTECTED_BOT_IDS:
+                        logger.info(f"🛡️ Skipping protected bot: {chat_title} (ID: {chat_id})")
+                        continue
 
                     if is_bot:
                         bot_count += 1
@@ -823,10 +836,9 @@ async def step2_spam_check(
                             left_chats += 1
                             operation_performed = True
 
-                        # Block bots - সঠিক flow (delete আগে, block পরে)
+                        # Block bots
                         if block_bots and is_bot:
                             try:
-                                # Step 1: Chat history delete করুন
                                 try:
                                     await client.invoke(
                                         DeleteHistory(
@@ -839,13 +851,12 @@ async def step2_spam_check(
                                     logger.info(f"Deleted history for bot: {chat_title}")
                                 except Exception as delete_error:
                                     logger.warning(f"Failed to delete history for {chat_title}: {delete_error}")
-                                
-                                # Step 2: Bot block করুন
+
                                 await client.block_user(chat_id)
                                 blocked_bots += 1
                                 operation_performed = True
                                 logger.info(f"✅ Blocked bot: {chat_title}")
-                        
+        
                             except FloodWait as e:
                                 wait = min(e.value, 60)
                                 await asyncio.sleep(wait)
@@ -855,15 +866,14 @@ async def step2_spam_check(
                         if operation_performed:
                             total_processed += 1
 
-                            # Rate limiting - bot block এর জন্য slow করুন
                             if total_processed <= 10:
-                                await asyncio.sleep(1)  # Bot block এর জন্য 1 second
+                                await asyncio.sleep(0.05)
                             elif total_processed <= 30:
-                                await asyncio.sleep(2)  # 30 এর পরে 2 seconds
+                                await asyncio.sleep(0.5)
                             elif total_processed <= 50:
-                                await asyncio.sleep(3)  # 50 এর পরে 3 seconds
+                                await asyncio.sleep(1)
                             else:
-                                await asyncio.sleep(5)  # 50+ হলে 5 seconds
+                                await asyncio.sleep(2)
 
                     except FloodWait as e:
                         wait = min(e.value, 60)
@@ -1018,16 +1028,29 @@ async def step2_spam_check(
                 logger.warning(f"Error checking username: {e}")
 
         # Update profile photo
-        photo_url = set_profile_photo  # ✅ only this
-        # ✅ main server থেকে আসা profile_pic_url ও ধরো
+        photo_url = set_profile_photo
         if not photo_url:
-            photo_url = None  # payload.get('profile_pic_url') already handled upstream
+            photo_url = None
 
         if photo_url:
             try:
                 logger.info(f"📥 Downloading photo from: {photo_url}")
 
-                async with httpx.AsyncClient(timeout=30, follow_redirects=True) as http:
+                # ✅ Browser-like headers — avoid Imgur 429/403
+                headers = {
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                  "AppleWebKit/537.36 (KHTML, like Gecko) "
+                                  "Chrome/120.0.0.0 Safari/537.36",
+                    "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+                    "Accept-Language": "en-US,en;q=0.9",
+                    "Referer": "https://imgur.com/",
+                }
+
+                async with httpx.AsyncClient(
+                    timeout=30, 
+                    follow_redirects=True,
+                    headers=headers
+                ) as http:
                     response = await http.get(photo_url)
 
                 content_type = response.headers.get('content-type', '').lower()
@@ -1035,7 +1058,6 @@ async def step2_spam_check(
 
                 logger.info(f"Response: {response.status_code}, Type: {content_type}, Size: {content_len}")
 
-                # ✅ Validation
                 if response.status_code != 200:
                     logger.error(f"❌ Bad status: {response.status_code}")
                 elif content_len < 1000:
@@ -1051,16 +1073,24 @@ async def step2_spam_check(
                     logger.info(f"✅ Valid image saved: {photo_path} ({content_len} bytes)")
 
                     try:
-                        # ✅ আগে existing photo delete করো (conflict এড়াতে)
+                        # Delete old PFP (with separate specific errors)
                         try:
+                            old_photos_deleted = False
                             async for photo in client.get_chat_photos("me", limit=1):
-                                await client.delete_profile_photos(photo.file_id)
-                                logger.info("🗑️ Old PFP deleted")
-                                break
+                                try:
+                                    await client.delete_profile_photos(photo.file_id)
+                                    old_photos_deleted = True
+                                    logger.info("🗑️ Old PFP deleted")
+                                except Exception as del_err:
+                                    logger.warning(f"⚠️ Could not delete old photo: {del_err}")
+                                break  # Only delete the first (most recent) photo
+    
+                            if not old_photos_deleted:
+                                logger.info("ℹ️ No old profile photo to delete")
                         except Exception as e:
-                            logger.warning(f"No old photo to delete: {e}")
+                            logger.warning(f"⚠️ Error checking old photos: {e}")
 
-                        # ✅ তারপর new photo set করো
+                        # Set new PFP
                         await client.set_profile_photo(photo=photo_path)
                         profile_updated = True
                         logger.info(f"✅✅ Profile photo set successfully for {phone_number}!")
